@@ -7,16 +7,31 @@ const { userModel } = require("./models/userModel");
 const { TransportProviderModel } = require('./models/TransportProvider');
 const { RouteModel } = require('./models/Route');
 const { AssignModel } = require('./models/AssignedRoute');
-const axios = require('axios');
+const { BookingModel } = require('./models/Booking');
+const { CrowdsourcedReportModel } = require('./models/CrowdsourcedReport');
+const { AssignedRouteCabModel } = require('./models/AssignedRouteCab');
+const { NotificationModel } = require('./models/Notification');
+
+
 
 mongoose.connect("mongodb+srv://aswinkrishnam16:aswinkrishnam@cluster0.2iu51vz.mongodb.net/TravelAlertDB?retryWrites=true&w=majority&appName=Cluster0");
 
+
+const axios = require('axios');
+const nodemailer = require('nodemailer');
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// JWT secret key
 const jwtSecret = 'blog-app';
+
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail', // or your preferred email service
+  auth: {
+      user: 'commutesmarthelp@gmail.com', // replace with your email
+      pass: 'apyi zojl qjhg fbnq' // replace with your email password or app-specific password
+  }
+});
 
 // Encryption
 const generateHashedPassword = async (password) => {
@@ -32,23 +47,416 @@ async function getLocationName(lat, lng) {
   return response.data.display_name;
 }
 
-// app.js
 
-// ... other code remains the same
+app.get('/available-cabs/:routeId', async (req, res) => {
+  const { routeId } = req.params;
+
+  try {
+    const availableCabs = await AssignedRouteCabModel.find({ route: routeId })
+      .populate('cab') // assuming `cab_id` is the reference field to TransportProviderModel
+      .exec();
+
+    res.status(200).json(availableCabs);
+  } catch (error) {
+    console.error("Error fetching available cabs:", error);
+    res.status(500).json({ error: 'Failed to fetch available cabs' });
+  }
+});
+
+app.put('/update-user/:userId', async (req, res) => {
+  const { userId } = req.params;
+  const { name, email, phoneNumber } = req.body;
+
+  try {
+    const updatedUser = await userModel.findByIdAndUpdate(userId, {
+      name,
+      email,
+      phoneNumber,
+    }, { new: true });
+
+    res.status(200).json({ status: 'success', user: updatedUser });
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).json({ error: 'Failed to update user details' });
+  }
+});
+app.get('/latest-bookings/:userId', async (req, res) => {
+  try {
+    const bookings = await BookingModel.find({ userId: req.params.userId })
+      .sort({ bookingDate: -1 }) // Sort by createdAt descending
+      .limit(3); // Limit to 3 latest bookings
+    res.status(200).json(bookings);
+  } catch (error) {
+    console.error('Error fetching bookings:', error);
+    res.status(500).json({ error: 'Failed to fetch bookings' });
+  }
+});
+
+// Fetch latest notifications for a user
+app.get('/latest-notifications/:userId', async (req, res) => {
+  try {
+    const notifications = await NotificationModel.find({ user_id: req.params.userId })
+      .sort({ sent_at: -1 }) // Sort by sent_at descending
+      .limit(3); // Limit to 3 latest notifications
+    res.status(200).json(notifications);
+  } catch (error) {
+    console.error('Error fetching notifications:', error);
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+app.get('/available-routes-cabs', async (req, res) => {
+  try {
+    const routes = await RouteModel.find({});
+    const cabs = await TransportProviderModel.find({ service_type: 'Cab', availability_status: 'Active' });
+    res.json({ routes, cabs });
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching routes or cabs' });
+  }
+});
+
+// Assign route to a cab
+app.post('/assign-route-cab', async (req, res) => {
+  const { routeId, cabId, date, time } = req.body;
+
+  try {
+    const newAssignedRouteCab = new AssignedRouteCabModel({
+      route: routeId,
+      cab: cabId,
+      date,
+      time,
+    });
+
+    await newAssignedRouteCab.save();
+    res.json({ message: 'Route successfully assigned to cab' });
+  } catch (error) {
+    res.status(500).json({ error: 'Error assigning route to cab' });
+  }
+});
+app.get('/reports/status/:status', async (req, res) => {
+  try {
+    const status = req.params.status;
+    const reports = await CrowdsourcedReportModel.find({ status });
+    res.json(reports);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to retrieve reports by status' });
+  }
+});
+// Verify or confirm a report
+app.post('/verify-report/:reportId', async (req, res) => {
+  const { reportId } = req.params;
+  const { status } = req.body;
+
+  try {
+    // Update report status
+    const report = await CrowdsourcedReportModel.findByIdAndUpdate(reportId, { status }, { new: true });
+    const assignedRoutes = await AssignModel.find({ route: report.route_id });
+
+    if (status=== 'Confirmed'){
+      await BookingModel.updateMany(
+        { assignedRouteId: { $in: assignedRoutes.map(route => route._id) } },
+        { $set: { status: 'Delayed' } }
+      );
+    }
+    else{
+      await BookingModel.updateMany(
+        { assignedRouteId: { $in: assignedRoutes.map(route => route._id) } },
+        { $set: { status: 'Confirmed' } }
+      );
+    }
+
+    if (status === 'Confirmed' && report.report_type === 'Delay') {
+      // Find affected assigned routes
+
+
+      // Collect user IDs from bookings for these assigned routes
+      const userIds = [];
+      for (const assignedRoute of assignedRoutes) {
+        const bookings = await BookingModel.find({ assignedRouteId: assignedRoute._id });
+        bookings.forEach(booking => userIds.push(booking.userId));
+      }
+
+      // Get unique user IDs
+      const uniqueUserIds = [...new Set(userIds)];
+
+      // Fetch user details
+      const users = await userModel.find({ _id: { $in: uniqueUserIds } });
+
+      // Send email notifications
+      users.forEach(async (user) => {
+        const mailOptions = {
+          from: 'commutesmarthelp@gmail.com',
+          to: user.email,
+          subject: 'Route Delay Notification',
+          html: `
+            <div style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
+              <h2 style="color: #2596be;">Route Delay Notification</h2>
+              <p>Dear ${user.name},</p>
+              <p>We regret to inform you that your booked route has been delayed.</p>
+              <p>Please plan accordingly. We apologize for the inconvenience.</p>
+              <p>Thank you for your understanding,<br>CommuteSmart: Real-Time Alerts & Alternative Route Suggestions</p>
+            </div>
+          `,
+        };
+
+        // Send the email
+        transporter.sendMail(mailOptions, (error, info) => {
+          if (error) {
+            console.error(`Error sending email to ${user.email}:`, error);
+          } else {
+            console.log(`Email sent to ${user.email}:`, info.response);
+          }
+        });
+
+        // Add notification to the Notifications table
+        const notification = new NotificationModel({
+          user_id: user._id,
+          route_id: report.route_id,
+          notification_type: 'Delay Alert',
+          message: `Your booked route has been delayed. Please plan accordingly.`,
+          sent_at: new Date(),
+        });
+
+        await notification.save();
+      });
+
+      // Update booking status to 'Delayed'
+      
+    }
+
+    res.status(200).json({ message: `Report ${status} successfully`, report });
+  } catch (error) {
+    console.error('Error verifying report:', error);
+    res.status(500).json({ error: 'Failed to update report status' });
+  }
+});
+
+
+
+app.post('/submit-report', async (req, res) => {
+  try {
+    const { userId, routeId, reportType, description } = req.body;
+    const newReport = new CrowdsourcedReportModel({
+      user_id: userId,
+      route_id: routeId,
+      report_type: reportType,
+      description,
+    });
+    await newReport.save();
+    res.status(200).json({ message: 'Report submitted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to submit report' });
+  }
+});
+
+// Fetch reports for admin verification
+app.get('/reports', async (req, res) => {
+  try {
+    const reports = await CrowdsourcedReportModel.find({});
+    res.status(200).json(reports);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch reports' });
+  }
+});
+
+
+
+app.get('/user-bookings/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Get all bookings for the user
+    const bookings = await BookingModel.find({ userId });
+
+    const bookingDetails = await Promise.all(
+      bookings.map(async (booking) => {
+        const assignedRoute = await AssignModel.findById(booking.assignedRouteId);
+        const route = await RouteModel.findById(assignedRoute.route);
+        const bus = await TransportProviderModel.findById(assignedRoute.bus);
+
+        return {
+          bookingId: booking._id,
+          bookingDate: booking.bookingDate,
+          status: booking.status,
+          routeId:route._id,
+          routeNumber: route.route_number,
+          startLocation: route.start_location.name,
+          endLocation: route.end_location.name,
+          busName: bus.name,
+          travelDate: assignedRoute.date,
+          travelTime: assignedRoute.time,
+        };
+      })
+    );
+
+    res.status(200).json(bookingDetails);
+  } catch (error) {
+    console.error("Error fetching bookings:", error);
+    res.status(500).json({ error: "Error fetching booking details" });
+  }
+});
+
+app.post('/book-route', async (req, res) => {
+  const { userId, assignedRouteId } = req.body;
+
+  try {
+    // Fetch the user's email from the User model
+    const assignedRoutes = await AssignModel.findById(assignedRouteId);
+    const route = await RouteModel.findById(assignedRoutes.route);
+
+    const user = await userModel.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Create a new booking
+    const newBooking = new BookingModel({
+      userId,
+      assignedRouteId,
+    });
+
+    // Save the booking
+    await newBooking.save();
+    // console.log("Success")
+    // Send confirmation email
+
+    const currentDate = new Date();
+    const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
+    const formattedDate = currentDate.toLocaleDateString(undefined, options);
+    const formattedTime = currentDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const mailOptions = {
+      from: 'commutesmarthelp@gmail.com',
+      to: user.email,
+      subject: 'CommuteSmart: Your Booking Confirmation',
+      html: `
+        <html>
+          <head>
+            <style>
+              body {
+                font-family: 'Arial', sans-serif;
+                background-color: #f4f7fa;
+                color: #333;
+                margin: 0;
+                padding: 20px;
+              }
+              .container {
+                background-color: #ffffff;
+                border-radius: 12px;
+                box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1);
+                padding: 40px;
+                max-width: 650px;
+                margin: auto;
+                border-top: 8px solid #2596be;
+              }
+              h2 {
+                color: #2596be;
+                font-size: 28px;
+                border-bottom: 3px solid #2596be;
+                padding-bottom: 10px;
+              }
+              p {
+                font-size: 16px;
+                color: #555;
+                line-height: 1.6;
+              }
+              .journey-details {
+                margin: 25px 0;
+                padding: 20px;
+                border-left: 6px solid #2596be;
+                background-color: #e7f5fb;
+                border-radius: 8px;
+              }
+              .journey-details p {
+                font-size: 15px;
+                color: #333;
+              }
+              .footer {
+                margin-top: 25px;
+                font-size: 14px;
+                color: #777;
+                text-align: center;
+              }
+              .location {
+                font-weight: bold;
+                color: #ff6f61;
+              }
+              .thank-you {
+                margin-top: 25px;
+                font-size: 18px;
+                color: #2596be;
+                font-weight: 600;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h2>Your Booking is Confirmed!</h2>
+              <p>Hi ${user.name},</p>
+              <p>Your journey with CommuteSmart is all set! Here’s a summary of your booking details:</p>
+              
+              <div class="journey-details">
+                <p><strong>Booking ID:</strong> ${assignedRouteId}</p>
+                <p><strong>Starting Location:</strong> <span class="location">${route.start_location.name}</span></p>
+                <p><strong>Destination:</strong> <span class="location">${route.end_location.name}</span></p>
+                <p><strong>Date & Time:</strong> ${formattedDate} at ${formattedTime}</p>
+              </div>
+    
+              <p class="thank-you">We appreciate your choice to travel with us!</p>
+              <p class="footer">Safe travels,<br>CommuteSmart: Real-Time Alerts & Alternative Routes</p>
+            </div>
+          </body>
+        </html>
+      `,
+    };    
+    
+    
+    
+    // Send the email
+    transporter.sendMail(mailOptions, (error, info) => {
+      if (error) {
+        return console.log(error);
+      }
+      console.log('Email sent: ' + info.response);
+    });
+
+    return res.status(201).json({ message: 'Booking created successfully' });
+  } catch (error) {
+    console.error('Error creating booking:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
 
 app.get('/assignedRoutes', async (req, res) => {
   try {
-    const assignedRoutes = await AssignedRoute.find()
-      .populate('bus') // Populate transport provider details
-      .populate({
-        path: 'route',
-        select: 'start_location end_location transport_type route_number', // Include specific fields from Route
-      });
-    res.json(assignedRoutes);
+    // Step 1: Get all assigned routes
+    const assignedRoutes = await AssignModel.find();
+
+    // Step 2: Fetch route and bus details for each assigned route
+    const assignedRoutesWithDetails = await Promise.all(assignedRoutes.map(async (assigned) => {
+      const route = await RouteModel.findById(assigned.route); // Fetch the route details manually
+      const bus = await TransportProviderModel.findById(assigned.bus); // Fetch the bus details manually
+      
+      return {
+        _id: assigned._id,
+        date: assigned.date,
+        time: assigned.time,
+        route: {
+          route_number: route.route_number,
+          start_location: route.start_location.name,
+          end_location: route.end_location.name,
+        },
+        bus: {
+          name: bus.name,
+          contact_info: bus.contact_info,
+        }
+      };
+    }));
+
+    res.json(assignedRoutesWithDetails);
   } catch (error) {
     res.status(500).json({ error: 'Error fetching assigned routes' });
   }
 });
+
 
 // ... other code remains the same
 
