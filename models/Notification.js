@@ -13,7 +13,7 @@ const notificationSchema = new mongoose.Schema({
   },
   notification_type: {
     type: String,
-    enum: ['Delay Alert', 'Alternative Route Suggestion'],
+    enum: ['Delay Alert', 'Alternative Route Suggestion','Booking Confirmation'],
     required: true,
   },
   message: {

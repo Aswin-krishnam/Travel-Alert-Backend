@@ -11,6 +11,7 @@ const { BookingModel } = require('./models/Booking');
 const { CrowdsourcedReportModel } = require('./models/CrowdsourcedReport');
 const { AssignedRouteCabModel } = require('./models/AssignedRouteCab');
 const { NotificationModel } = require('./models/Notification');
+const { CabBookingModel } = require('./models/CabBooking');
 
 
 
@@ -48,6 +49,80 @@ async function getLocationName(lat, lng) {
 }
 
 
+app.post('/book-cab', async (req, res) => {
+  const { userId, cabId, routeId, date, time } = req.body;
+
+  try {
+    // Create a new booking
+    const newBooking = new CabBookingModel({
+      userId,
+      cabId,
+      routeId,
+      date,
+      time,
+    });
+    await newBooking.save();
+
+    // Send confirmation email to the user
+    const user = await userModel.findById(userId);
+    const cab = await TransportProviderModel.findById(cabId);
+    
+    const userMailOptions = {
+      from: 'commutesmarthelp@gmail.com',
+      to: user.email,
+      subject: 'Cab Booking Confirmation',
+      text: `Hello ${user.name},\n\nYour cab has been successfully booked!\n\nDriver Name: ${cab.name}\nService Type: ${cab.service_type}\nDate: ${date}\nTime: ${time}\n\nThank you for choosing our service!`,
+    };
+
+    const driverMailOptions = {
+      from: 'commutesmarthelp@gmail.com',
+      to: cab.contact_info.email,
+      subject: 'New Cab Booking',
+      text: `Hello ${cab.name},\n\nYou have a new cab booking!\n\nUser Name: ${user.name}\nUser Email: ${user.email}\nUser Phone: ${user.phoneNumber}\nRoute ID: ${routeId}\nDate: ${date}\nTime: ${time}\n\nThank you!`,
+    };
+
+    await transporter.sendMail(userMailOptions);
+    await transporter.sendMail(driverMailOptions);
+
+    // Update the notification table
+    const notification = new NotificationModel({
+      user_id: userId,
+      route_id: routeId,
+      notification_type: 'Booking Confirmation',
+      message: `Your cab has been booked for ${date} at ${time}.`,
+    });
+    await notification.save();
+
+    res.status(201).json({ message: 'Cab booked successfully!', booking: newBooking });
+  } catch (error) {
+    console.error("Error booking cab:", error);
+    res.status(500).json({ error: 'Failed to book cab' });
+  }
+});
+
+app.get('/admin-stats', async (req, res) => {
+  try {
+    const totalUsers = await userModel.countDocuments();
+    const totalAdmins = await userModel.countDocuments({ role: 'admin' });
+    
+    
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 3);
+    const newRegistrations = await userModel.countDocuments({ createdAt: { $gte: oneWeekAgo } });
+    
+    const rolesAssigned = await userModel.distinct('role').then(roles => roles.length);
+
+    res.status(200).json({
+      totalUsers,
+      totalAdmins,
+      newRegistrations,
+      rolesAssigned,
+    });
+  } catch (error) {
+    console.error('Error fetching admin stats:', error);
+    res.status(500).json({ error: 'Failed to fetch admin stats' });
+  }
+});
 app.get('/available-cabs/:routeId', async (req, res) => {
   const { routeId } = req.params;
 
